@@ -1,4 +1,4 @@
-module("luci.controller.oc_tools", package.seeall)
+module("luci.controller.toolsoc", package.seeall)
 
 function index()
   local fs = require "nixio.fs"
