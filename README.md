@@ -50,7 +50,23 @@ rm -f /tmp/luci-indexcache
 # 6) Cek log rotor
 logread -e oc-rotor | tail -n 50
 ```
+# Tambahkan ke cronjob
 
+```bash
+
+/etc/init.d/cron enable
+/etc/init.d/cron start
+
+crontab -l > /tmp/mycron 2>/dev/null
+cat >> /tmp/mycron <<'CRON'
+# Update file log untuk web tiap 1 menit (ambil 500 baris terakhir dari syslog yang memuat tag oc-rotor)
+*/1 * * * *  /bin/sh -c 'logread -e oc-rotor | tail -n 500 > /www/oc-rotor.log'
+# Bersihkan/truncate file log web tiap 5 menit
+*/5 * * * *  /bin/sh -c ': > /www/oc-rotor.log'
+CRON
+crontab /tmp/mycron
+rm -f /tmp/mycron
+```
 # Begitu selesai, buka LuCI → Services → OC D/E dan OC Ping, atau langsung akses:
 
 ** http://IP-Openwrt/oc-yaml.html
