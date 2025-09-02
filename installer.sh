@@ -1,12 +1,11 @@
 #!/bin/sh
 # installer.sh — pemasang sekali klik untuk Rotor + Web UI + Modem CLI di OpenWrt
-# Pakai contoh:
+# Pakai:
 #   curl -fsSL https://raw.githubusercontent.com/Hnatta/rotor/main/installer.sh | sh
-# atau:
+# Atau override sumber:
 #   curl -fsSL https://raw.githubusercontent.com/Hnatta/rotor/main/installer.sh | sh -s -- --repo-base https://raw.githubusercontent.com/Hnatta/rotor/main
 set -eu
 
-# -------- arg parsing --------
 REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -17,66 +16,77 @@ done
 
 say(){ echo "[installer] $*"; }
 
-# -------- cek root --------
+# ---------- cek root ----------
 if [ "$(id -u)" != "0" ]; then
   say "Harus dijalankan sebagai root"; exit 1
 fi
 
-# -------- paket --------
-say "Memasang paket: curl jq ca-bundle (abaikan jika sudah)"
-opkg update >/dev/null 2>&1 || true
-opkg install curl jq ca-bundle || true
+# ---------- paket minimal ----------
+need_update=0
+ensure_cmd() {
+  # $1=binary, $2=pkgname
+  if ! command -v "$1" >/dev/null 2>&1; then
+    [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
+    opkg install "$2" || true
+  fi
+}
+say "Memeriksa paket: curl jq ca-bundle"
+ensure_cmd curl curl
+ensure_cmd jq jq
+if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; then
+  [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
+  opkg install ca-bundle || true
+fi
 
-# -------- helper unduh --------
+# ---------- helper unduh ----------
 fetch() {
-  # arg1: src (relative to REPO_BASE), arg2: dst path, arg3(optional): mode (e.g. +x)
+  # $1: src path relatif REPO_BASE, $2: dst path, $3 (opsi): +x untuk chmod
   local src="$1" dst="$2" mode="${3:-}"
   local dir; dir="$(dirname "$dst")"
   [ -d "$dir" ] || mkdir -p "$dir"
   say "Ambil $src -> $dst"
   curl -fsSL "$REPO_BASE/$src" -o "$dst"
-  # strip CRLF kalau ada
   sed -i 's/\r$//' "$dst" 2>/dev/null || true
-  case "$mode" in
-    +x) chmod +x "$dst" ;;
-  esac
+  [ "$mode" = "+x" ] && chmod +x "$dst"
 }
 
-# -------- ambil file-file --------
-# Modem CLI
+# ---------- ambil file-file ----------
+# CLI modem
 fetch files/usr/bin/modem /usr/bin/modem +x
 
-# Rotor core
+# rotor daemon
 fetch files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
 
-# Env (jangan timpa kalau sudah ada)
+# env (jangan timpa jika sudah ada)
 if [ ! -f /etc/oc-rotor.env ]; then
   fetch files/etc/oc-rotor.env /etc/oc-rotor.env
 else
   say "/etc/oc-rotor.env sudah ada — tidak ditimpa"
 fi
 
-# Service
+# service
 fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# Web UI
+# web ui
 fetch files/www/rotor-log.html /www/rotor-log.html
 fetch files/www/oc-yaml.html  /www/oc-yaml.html
 
-# LuCI controller (menu Services -> OC D/E & OC Ping)
-fetch files/usr/lib/lua/luci/controller/oc-tools.lua /usr/lib/lua/luci/controller/oc_tools.lua
+# LuCI controller → pakai nama baru: toolsoc.lua
+fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
+# Bersihkan nama lama jika ada (hindari bentrok)
+[ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
+[ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# -------- enable services --------
+# ---------- enable services ----------
 say "Enable + start service rotor"
 /etc/init.d/oc-rotor stop >/dev/null 2>&1 || true
 /etc/init.d/oc-rotor enable
 /etc/init.d/oc-rotor start
 
-# -------- cron untuk update & bersihkan /www/oc-rotor.log --------
+# ---------- cron untuk log web ----------
 say "Setup cron untuk update & bersihkan /www/oc-rotor.log"
 CR_TMP="/tmp/oc-installer-cron.$$"
 crontab -l 2>/dev/null > "$CR_TMP" || true
-# hapus entri lama (idempotent)
 sed -i '/oc-rotor\.log/d' "$CR_TMP" 2>/dev/null || true
 cat >> "$CR_TMP" <<'CRON'
 # Update file log untuk web tiap 1 menit (ambil 500 baris terakhir tag oc-rotor)
@@ -87,11 +97,11 @@ CRON
 crontab "$CR_TMP"
 rm -f "$CR_TMP"
 
-# -------- reload LuCI & uHTTPd --------
+# ---------- reload LuCI & uHTTPd ----------
 rm -f /tmp/luci-indexcache 2>/dev/null || true
 /etc/init.d/uhttpd reload 2>/dev/null || /etc/init.d/uhttpd restart 2>/dev/null || true
 
-# -------- ringkasan --------
+# ---------- ringkasan ----------
 CTRL_HINT_IP="$(uci get network.lan.ipaddr 2>/dev/null || echo '192.168.1.1')"
 say "Selesai ✅"
 cat <<EOF
