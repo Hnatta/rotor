@@ -69,6 +69,6 @@ rm -f /tmp/mycron
 ```
 # Begitu selesai, buka LuCI → Services → OC D/E dan OC Ping, atau langsung akses:
 
-** http://IP-Openwrt/oc-yaml.html
+** http://192.168.1.1/oc-yaml.html
 
-** http://IP-Openwrt/rotor-log.html
+** http://192.168.1.1/rotor-log.html
