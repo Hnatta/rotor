@@ -67,11 +67,14 @@ fi
 # service
 fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# web ui
-fetch files/www/rotor-log.html /www/rotor-log.html
-fetch files/www/oc-yaml.html  /www/oc-yaml.html
+# web ui (nama baru)
+fetch files/www/logrotor.html /www/logrotor.html
+fetch files/www/yaml.html     /www/yaml.html
+# bersihkan nama lama jika masih ada
+[ -f /www/rotor-log.html ] && rm -f /www/rotor-log.html
+[ -f /www/oc-yaml.html  ] && rm -f /www/oc-yaml.html
 
-# LuCI controller → pakai nama baru: toolsoc.lua
+# LuCI controller → toolsoc.lua
 fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
 # Bersihkan nama lama jika ada (hindari bentrok)
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
@@ -110,8 +113,8 @@ cat <<EOF
 - Modem CLI   : /usr/bin/modem   (pakai: modem ip | modem rb | modem sd)
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
 - Env         : /etc/oc-rotor.env  (ubah CTRL/SECRET/GROUPS/PING_URL sesuai sistem)
-- Web UI      : http://$CTRL_HINT_IP/oc-yaml.html   (OC D/E — Converter)
-                 http://$CTRL_HINT_IP/rotor-log.html (OC Ping — Monitor)
+- Web UI      : http://$CTRL_HINT_IP/yaml.html     (OC D/E — Converter)
+                 http://$CTRL_HINT_IP/logrotor.html (OC Ping — Monitor)
 - LuCI menu   : Services → OC D/E, Services → OC Ping
 - Web Log     : /www/oc-rotor.log (diisi via cron, dibersihkan tiap 5 menit)
 
