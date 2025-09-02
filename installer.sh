@@ -64,7 +64,7 @@ fetch files/www/rotor-log.html /www/rotor-log.html
 fetch files/www/oc-yaml.html  /www/oc-yaml.html
 
 # LuCI controller (menu Services -> OC D/E & OC Ping)
-fetch files/usr/lib/lua/luci/controller/oc-tools.lua /usr/lib/lua/luci/controller/oc-tools.lua
+fetch files/usr/lib/lua/luci/controller/oc-tools.lua /usr/lib/lua/luci/controller/oc_tools.lua
 
 # -------- enable services --------
 say "Enable + start service rotor"
