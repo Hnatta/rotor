@@ -1,5 +1,5 @@
 #!/bin/sh
-# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP (cron log dipertahankan)
+# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP (logrotor.php opsional)
 set -eu
 
 REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
@@ -42,19 +42,16 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
 fi
 
 # PHP-CGI untuk .php di uHTTPd (best effort; tidak fatal kalau gagal)
-say "Menyiapkan dukungan PHP-CGI (opsional tapi direkomendasikan)"
-# Coba pasang php8-cgi, kalau gagal coba php7-cgi
+say "Menyiapkan dukungan PHP-CGI (opsional)"
 if ! command -v php-cgi >/dev/null 2>&1; then
   [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
   opkg install php8-cgi || opkg install php7-cgi || true
 fi
-# Tambahkan interpreter .php ke uhttpd kalau belum ada
 if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
   if ! uci -q show uhttpd.main.interpreter | grep -q "\.php=/usr/bin/php-cgi"; then
     uci add_list uhttpd.main.interpreter=".php=/usr/bin/php-cgi" 2>/dev/null || true
     uci commit uhttpd 2>/dev/null || true
   fi
-  # tambahkan index.php sebagai index jika belum ada
   if ! uci -q show uhttpd.main.index_page | grep -q "index.php"; then
     uci add_list uhttpd.main.index_page="index.php" 2>/dev/null || true
     uci commit uhttpd 2>/dev/null || true
@@ -63,7 +60,7 @@ fi
 
 # ---------- helper unduh ----------
 fetch() {
-  # $1: src path relatif REPO_BASE, $2: dst path, $3 (opsi): +x
+  # $1: src (relatif REPO_BASE), $2: dst, $3 (opsi): +x
   local src="$1" dst="$2" mode="${3:-}" tmp dir
   dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
   tmp="${dst}.tmp.$$"
@@ -73,6 +70,23 @@ fetch() {
   sed -i 's/\r$//' "$tmp" 2>/dev/null || true
   mv "$tmp" "$dst"
   [ "$mode" = "+x" ] && chmod +x "$dst"
+}
+
+fetch_opt() {
+  # seperti fetch(), tapi tidak gagal kalau 404/timeout
+  local src="$1" dst="$2" mode="${3:-}" tmp dir
+  dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
+  tmp="${dst}.tmp.$$"
+  say "Ambil (opsional) $src -> $dst"
+  if curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 \
+       "$REPO_BASE/$src" -o "$tmp"; then
+    sed -i 's/\r$//' "$tmp" 2>/dev/null || true
+    mv "$tmp" "$dst"
+    [ "$mode" = "+x" ] && chmod +x "$dst"
+  else
+    say "Lewati: $src tidak tersedia (opsional)."
+    rm -f "$tmp" 2>/dev/null || true
+  fi
 }
 
 # ---------- pasang inti ----------
@@ -86,15 +100,15 @@ else
 fi
 fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# ---------- tambah TinyFM PHP & LuCI Views/Controller ----------
+# ---------- TinyFM PHP & LuCI Views/Controller ----------
 say "Menambahkan TinyFM PHP & LuCI views/controller"
-# Web PHP
+# Web PHP (yaml wajib, logrotor opsional)
 fetch files/www/tinyfm/yaml.php     /www/tinyfm/yaml.php
-fetch files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php
-# LuCI views
+fetch_opt files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php
+# LuCI views (wajib)
 fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
 fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
-# LuCI controller
+# LuCI controller (wajib)
 fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
 # Bersihkan artefak HTML lama jika ada
 [ -f /www/yaml.html ] && rm -f /www/yaml.html
@@ -103,7 +117,7 @@ fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
 [ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# ---------- cron untuk log web (dipertahankan) ----------
+# ---------- cron untuk log web (tetap) ----------
 say "Menetapkan cron untuk /www/oc-rotor.log (tiap menit, atomic write)"
 CR_TMP="/tmp/oc-installer-cron.$$"
 crontab -l 2>/dev/null > "$CR_TMP" || true
@@ -142,15 +156,16 @@ cat <<EOF
 - Modem CLI   : /usr/bin/modem
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
 - Env         : /etc/oc-rotor.env  [perm 600]
-- Web (PHP)   : http://$CTRL_HINT_IP/tinyfm/yaml.php , http://$CTRL_HINT_IP/tinyfm/logrotor.php
+- Web (PHP)   : http://$CTRL_HINT_IP/tinyfm/yaml.php
+                (logrotor.php opsional: http://$CTRL_HINT_IP/tinyfm/logrotor.php)
 - LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
 - LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
 - Web Log     : /www/oc-rotor.log (diperbarui tiap menit oleh cron)
 
 Catatan:
-1) Pastikan PHP-CGI aktif di uHTTPd (skrip mencoba menambahkan interpreter .php=/usr/bin/php-cgi).
-2) Ubah /etc/oc-rotor.env jika perlu, lalu:
-   /etc/init.d/oc-rotor restart
-3) Cek log rotor:
-   logread -e oc-rotor | tail -n 50
+- Jika /tinyfm/logrotor.php tidak tersedia di repo, skrip melewati tanpa gagal.
+- Ubah /etc/oc-rotor.env jika perlu, lalu:
+  /etc/init.d/oc-rotor restart
+- Cek log rotor:
+  logread -e oc-rotor | tail -n 50
 EOF
