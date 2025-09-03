@@ -1,92 +1,96 @@
+cat > /tmp/install-rotor-from-zip.sh <<'SH'
 #!/bin/sh
-# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM HTML (no PHP)
-# Instal via terminal OpenWrt (TIMPA semua file):
-#   curl -fsSL https://raw.githubusercontent.com/Hnatta/rotor/main/installer.sh | sh
 set -eu
 
-REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
+ZIP="/tmp/rotor-main.zip"
 
-say(){ echo "[installer] $*"; }
-die(){ echo "[installer][ERR] $*" >&2; exit 1; }
+say(){ echo "[zip-installer] $*"; }
+die(){ echo "[zip-installer][ERR] $*" >&2; exit 1; }
 
-# ---------- argumen opsional ----------
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --repo-base) [ $# -ge 2 ] || die "Butuh nilai untuk --repo-base"; REPO_BASE="$2"; shift 2 ;;
-    *) die "Argumen tidak dikenal: $1" ;;
-  esac
-done
+[ -f "$ZIP" ] || die "ZIP tidak ditemukan: $ZIP (taruh di /tmp dulu)"
 
-# ---------- cek root & platform ----------
-[ "$(id -u)" = "0" ] || die "Harus dijalankan sebagai root"
-[ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lanjut jika custom build)"
-
-# ---------- paket minimal ----------
+# --- kebutuhan dasar ---
 need_update=0
-ensure_pkg_cmd() {
-  # $1=binary, $2=pkgname
-  if ! command -v "$1" >/dev/null 2>&1; then
+ensure() {
+  bin="$1"; pkg="$2"
+  if ! command -v "$bin" >/dev/null 2>&1; then
     [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
-    opkg install "$2" || true
-    command -v "$1" >/dev/null 2>&1 || die "Dependensi '$1' (paket $2) tidak tersedia setelah install"
+    opkg install "$pkg" || true
+    command -v "$bin" >/dev/null 2>&1 || die "Butuh $bin (paket: $pkg)"
   fi
 }
-
-say "Memeriksa paket: curl + ca-bundle"
-ensure_pkg_cmd curl curl
+ensure unzip unzip
+ensure curl curl
+# CA untuk TLS (kalau nanti pakai curl/wget lain)
 if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; then
   [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
   opkg install ca-bundle || true
-  [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/ssl/cert.pem ] || die "CA bundle tidak tersedia"
 fi
 
-# ---------- helper unduh (timpa + atomic) ----------
-fetch() {
-  # $1: src (relatif REPO_BASE), $2: dst, $3 (opsi): +x
-  local src="$1" dst="$2" mode="${3:-}" tmp dir
-  dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
-  tmp="${dst}.tmp.$$"
-  say "Ambil $src -> $dst"
-  curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 "$REPO_BASE/$src" -o "$tmp"
-  sed -i 's/\r$//' "$tmp" 2>/dev/null || true
-  mv "$tmp" "$dst"          # timpa selalu
-  [ "$mode" = "+x" ] && chmod +x "$dst"
+# --- ekstrak ZIP ---
+say "Ekstrak ZIP..."
+rm -rf /tmp/rotor-main /tmp/rotor-* 2>/dev/null || true
+unzip -o -q "$ZIP" -d /tmp
+ROOTDIR="$(find /tmp -maxdepth 1 -type d -name 'rotor-*' | head -n1 || true)"
+[ -n "$ROOTDIR" ] || die "Folder hasil unzip tidak ditemukan (cari rotor-*)"
+
+copy() { # $1=relpath dlm ZIP, $2=dst, $3(optional)=+x
+  rel="$1"; dst="$2"; mode="${3:-}"
+  src="${ROOTDIR}/${rel}"
+  if [ -f "$src" ]; then
+    mkdir -p "$(dirname "$dst")"
+    cp -f "$src" "$dst"
+    sed -i 's/\r$//' "$dst" 2>/dev/null || true
+    [ "$mode" = "+x" ] && chmod +x "$dst"
+    say "Pasang $rel -> $dst"
+    return 0
+  fi
+  return 1
 }
 
-# ---------- pasang inti (TIMPA SEMUA) ----------
-fetch files/usr/bin/modem /usr/bin/modem +x
-fetch files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
-fetch files/etc/oc-rotor.env /etc/oc-rotor.env
-chmod 600 /etc/oc-rotor.env
-fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
+# --- pasang inti (TIMPA) ---
+copy files/usr/bin/modem /usr/bin/modem +x
+copy files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
+copy files/etc/oc-rotor.env /etc/oc-rotor.env || true
+[ -f /etc/oc-rotor.env ] && chmod 600 /etc/oc-rotor.env
+copy files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# ---------- TinyFM: gunakan HTML, bukan PHP (TIMPA) ----------
-# file baru di repo diharapkan: files/www/tinyfm/yaml.html dan files/www/tinyfm/logrotor.html
-fetch files/www/tinyfm/yaml.html     /www/tinyfm/yaml.html
-fetch files/www/tinyfm/logrotor.html /www/tinyfm/logrotor.html
+# --- TinyFM: utamakan HTML; kalau tidak ada, pakai PHP; terakhir buat stub HTML ---
+# YAML viewer
+if ! copy files/www/tinyfm/yaml.html /www/tinyfm/yaml.html ; then
+  copy files/www/tinyfm/yaml.php /www/tinyfm/yaml.php || true
+fi
+# Log viewer
+if ! copy files/www/tinyfm/logrotor.html /www/tinyfm/logrotor.html ; then
+  if ! copy files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php ; then
+    mkdir -p /www/tinyfm
+    cat > /www/tinyfm/logrotor.html <<'EOF'
+<!doctype html><meta charset="utf-8"><title>oc-rotor log</title>
+<pre id="log" style="white-space:pre-wrap"></pre>
+<script>
+async function load(){try{const r=await fetch('/oc-rotor.log',{cache:'no-store'});document.getElementById('log').textContent=await r.text();}catch(e){document.getElementById('log').textContent='Gagal baca /oc-rotor.log: '+e}}
+load(); setInterval(load,5000);
+</script>
+EOF
+  fi
+fi
 
-# bersihkan file PHP lama bila ada
-[ -f /www/tinyfm/yaml.php ] && rm -f /www/tinyfm/yaml.php
-[ -f /www/tinyfm/logrotor.php ] && rm -f /www/tinyfm/logrotor.php
+# --- LuCI views & controller ---
+copy files/usr/lib/lua/luci/view/yaml.htm /usr/lib/lua/luci/view/yaml.htm || true
+copy files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm || true
+copy files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua || true
 
-# ---------- LuCI views & controller (TIMPA) ----------
-# Pastikan views merujuk ke .html (bukan .php)
-fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
-fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
-fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
+# --- bersihkan artefak lama yang bentrok ---
+rm -f /www/yaml.html /www/logrotor.html \
+      /usr/lib/lua/luci/controller/oc-tools.lua \
+      /usr/lib/lua/luci/controller/oc_tools.lua 2>/dev/null || true
 
-# ---------- bersihkan artefak lama yang bentrok ----------
-[ -f /www/yaml.html ] && rm -f /www/yaml.html
-[ -f /www/logrotor.html ] && rm -f /www/logrotor.html
-[ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
-[ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
-
-# ---------- cron: enable/start + dua entri (tulis & truncate) ----------
+# --- cron: enable + jadwalkan 2 entri ---
 if [ -x /etc/init.d/cron ]; then
   /etc/init.d/cron enable || true
   /etc/init.d/cron start  || true
 fi
-crontab -l > /tmp/mycron 2>/dev/null || true
+crontab -l 2>/dev/null > /tmp/mycron || true
 sed -i '/oc-rotor\.log/d' /tmp/mycron 2>/dev/null || true
 cat >> /tmp/mycron <<'CRON'
 # Update file log untuk web tiap 1 menit (ambil 500 baris terakhir dari syslog yang memuat tag oc-rotor)
@@ -97,30 +101,20 @@ CRON
 crontab /tmp/mycron 2>/dev/null || true
 rm -f /tmp/mycron
 
-# ---------- enable services ----------
-say "Enable + start service rotor"
+# --- nyalakan service & reload web ---
 /etc/init.d/oc-rotor stop >/dev/null 2>&1 || true
 /etc/init.d/oc-rotor enable
-/etc/init.d/oc-rotor start || die "Gagal start service oc-rotor"
+/etc/init.d/oc-rotor start
 
-# ---------- reload LuCI & uHTTPd ----------
 rm -f /tmp/luci-indexcache 2>/dev/null || true
-if [ -x /etc/init.d/uhttpd ]; then
-  /etc/init.d/uhttpd reload 2>/dev/null || /etc/init.d/uhttpd restart 2>/dev/null || true
-fi
+[ -x /etc/init.d/uhttpd ] && (/etc/init.d/uhttpd reload 2>/dev/null || /etc/init.d/uhttpd restart 2>/dev/null || true)
 
-# ---------- ringkasan ----------
-CTRL_HINT_IP="$(uci get network.lan.ipaddr 2>/dev/null || echo '192.168.1.1')"
-say "Selesai ✅"
-cat <<EOF
+say "Selesai. Coba akses:"
+IP="$(uci get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1)"
+echo " - http://$IP/tinyfm/yaml.html  (atau .php jika itu yang terpasang)"
+echo " - http://$IP/tinyfm/logrotor.html (atau .php jika itu yang terpasang)"
+echo "Log web: /www/oc-rotor.log (diputar tiap menit oleh cron)"
+SH
 
-== Ringkasan ==
-- Modem CLI   : /usr/bin/modem
-- Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
-- Env         : /etc/oc-rotor.env  [perm 600] (ditimpa)
-- Web (HTML)  : http://$CTRL_HINT_IP/tinyfm/yaml.html
-                http://$CTRL_HINT_IP/tinyfm/logrotor.html
-- LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
-- LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
-- Web Log     : /www/oc-rotor.log (update tiap 1 menit; truncate tiap 5 menit)
-EOF
+chmod +x /tmp/install-rotor-from-zip.sh
+sh /tmp/install-rotor-from-zip.sh
