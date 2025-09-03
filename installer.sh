@@ -1,9 +1,12 @@
 #!/bin/sh
 # installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP
-# logrotor.php opsional; cron diaktifkan & dijadwalkan (2 entri) seperti diminta
+# - logrotor.php opsional (tidak gagal jika 404)
+# - cron diaktifkan & dijadwalkan (2 entri)
+# - opsi --no-php-setup untuk melewati setup PHP/uHTTPd
 set -eu
 
 REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
+SETUP_PHP=1
 
 say(){ echo "[installer] $*"; }
 die(){ echo "[installer][ERR] $*" >&2; exit 1; }
@@ -14,6 +17,8 @@ while [ $# -gt 0 ]; do
     --repo-base)
       [ $# -ge 2 ] || die "Argumen untuk --repo-base harus diisi"
       REPO_BASE="$2"; shift 2 ;;
+    --no-php-setup)
+      SETUP_PHP=0; shift 1 ;;
     *)
       die "Argumen tidak dikenal: $1" ;;
   esac
@@ -44,20 +49,24 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
 fi
 
 # ---------- (opsional) PHP-CGI untuk .php di uHTTPd ----------
-say "Menyiapkan dukungan PHP-CGI (opsional)"
-if ! command -v php-cgi >/dev/null 2>&1; then
-  [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
-  opkg install php8-cgi || opkg install php7-cgi || true
-fi
-if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
-  if ! uci -q show uhttpd.main.interpreter | grep -q "\.php=/usr/bin/php-cgi"; then
-    uci add_list uhttpd.main.interpreter=".php=/usr/bin/php-cgi" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
+if [ "$SETUP_PHP" -eq 1 ]; then
+  say "Menyiapkan dukungan PHP-CGI (opsional)"
+  if ! command -v php-cgi >/dev/null 2>&1; then
+    [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
+    opkg install php8-cgi || opkg install php7-cgi || true
   fi
-  if ! uci -q show uhttpd.main.index_page | grep -q "index.php"; then
-    uci add_list uhttpd.main.index_page="index.php" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
+  if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
+    if ! uci -q show uhttpd.main.interpreter | grep -q "\.php=/usr/bin/php-cgi"; then
+      uci add_list uhttpd.main.interpreter=".php=/usr/bin/php-cgi" 2>/dev/null || true
+      uci commit uhttpd 2>/dev/null || true
+    fi
+    if ! uci -q show uhttpd.main.index_page | grep -q "index.php"; then
+      uci add_list uhttpd.main.index_page="index.php" 2>/dev/null || true
+      uci commit uhttpd 2>/dev/null || true
+    fi
   fi
+else
+  say "Lewati setup PHP-CGI (--no-php-setup)"
 fi
 
 # ---------- helper unduh ----------
@@ -120,14 +129,13 @@ fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
 [ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# ---------- cron: enable/start + dua entri sesuai permintaan ----------
+# ---------- cron: enable/start + dua entri ----------
 if [ -x /etc/init.d/cron ]; then
   /etc/init.d/cron enable || true
   /etc/init.d/cron start  || true
 fi
 
 crontab -l > /tmp/mycron 2>/dev/null || true
-# hapus entri lama yang mungkin dobel
 sed -i '/oc-rotor\.log/d' /tmp/mycron 2>/dev/null || true
 cat >> /tmp/mycron <<'CRON'
 # Update file log untuk web tiap 1 menit (ambil 500 baris terakhir dari syslog yang memuat tag oc-rotor)
@@ -163,11 +171,9 @@ cat <<EOF
                 (opsional) http://$CTRL_HINT_IP/tinyfm/logrotor.php
 - LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
 - LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
-- Web Log     : /www/oc-rotor.log (diperbarui tiap menit; dibersihkan tiap 5 menit)
+- Web Log     : /www/oc-rotor.log (update tiap 1 menit; truncate tiap 5 menit)
 
 Tips:
 - Ubah /etc/oc-rotor.env sesuai sistem, lalu:
-  /etc/init.d/oc-rotor restart
-- Cek log:
-  logread -e oc-rotor | tail -n 50
+/etc/init.d/oc-rotor restart
 EOF
