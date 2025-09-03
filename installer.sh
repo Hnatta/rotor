@@ -1,10 +1,11 @@
 #!/bin/sh
-# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP
-# - Paksa instal: /www/tinyfm/yaml.php (wajib dari repo) & /www/tinyfm/logrotor.php (repo atau stub)
-# - Cron diaktifkan & dijadwalkan (2 entri)
+# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP (pin ke commit terbaru)
 set -eu
 
-REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
+OWNER="Hnatta"
+REPO="rotor"
+REPO_REF=""    # akan diisi SHA commit terbaru, kecuali di-override --ref
+RAW_BASE=""    # https://raw.githubusercontent.com/$OWNER/$REPO/$REPO_REF
 
 say(){ echo "[installer] $*"; }
 die(){ echo "[installer][ERR] $*" >&2; exit 1; }
@@ -12,9 +13,9 @@ die(){ echo "[installer][ERR] $*" >&2; exit 1; }
 # ---------- argumen ----------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo-base)
-      [ $# -ge 2 ] || die "Argumen untuk --repo-base harus diisi"
-      REPO_BASE="$2"; shift 2 ;;
+    --ref)
+      [ $# -ge 2 ] || die "Argumen untuk --ref harus diisi"
+      REPO_REF="$2"; shift 2 ;;
     *)
       die "Argumen tidak dikenal: $1" ;;
   esac
@@ -23,6 +24,20 @@ done
 # ---------- cek root & platform ----------
 [ "$(id -u)" = "0" ] || die "Harus dijalankan sebagai root"
 [ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lanjutkan jika custom build)"
+
+# ---------- tentukan commit terbaru (jika --ref tidak diberikan) ----------
+if [ -z "${REPO_REF}" ]; then
+  say "Mengambil commit terbaru dari GitHub API…"
+  # Catatan: tanpa jq; parsing sederhana dengan sed. Tambah User-Agent biar tidak 403.
+  REPO_REF="$(curl -fsSL -H 'User-Agent: rotor-installer' \
+    "https://api.github.com/repos/${OWNER}/${REPO}/commits?per_page=1" \
+    | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{7,40\}\)".*/\1/p' \
+    | head -n1 || true)"
+  # fallback jika API gagal / rate-limit
+  [ -n "$REPO_REF" ] || { say "Gagal ambil SHA terbaru, fallback ke 'main'"; REPO_REF="main"; }
+fi
+RAW_BASE="https://raw.githubusercontent.com/${OWNER}/${REPO}/${REPO_REF}"
+say "Memakai ref: ${REPO_REF}"
 
 # ---------- helper pkg ----------
 need_update=0
@@ -44,32 +59,16 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
   [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/ssl/cert.pem ] || die "CA bundle tidak tersedia"
 fi
 
-# ---------- (opsional best-effort) PHP-CGI untuk .php di uHTTPd ----------
-say "Menyiapkan dukungan PHP-CGI (opsional, tidak fatal jika gagal)"
-if ! command -v php-cgi >/dev/null 2>&1; then
-  [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
-  opkg install php8-cgi || opkg install php7-cgi || true
-fi
-if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
-  if ! uci -q show uhttpd.main.interpreter | grep -q "\.php=/usr/bin/php-cgi"; then
-    uci add_list uhttpd.main.interpreter=".php=/usr/bin/php-cgi" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
-  fi
-  if ! uci -q show uhttpd.main.index_page | grep -q "index.php"; then
-    uci add_list uhttpd.main.index_page="index.php" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
-  fi
-fi
-
 # ---------- helper unduh ----------
 fetch() {
-  # $1: src (relatif REPO_BASE), $2: dst, $3 (opsi): +x
+  # $1: src path relatif dari root repo (mis. files/usr/bin/modem)
+  # $2: dst path, $3 (opsi): +x untuk chmod
   local src="$1" dst="$2" mode="${3:-}" tmp dir
   dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
   tmp="${dst}.tmp.$$"
   say "Ambil $src -> $dst"
   curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 \
-    "$REPO_BASE/$src" -o "$tmp"
+    "$RAW_BASE/$src" -o "$tmp"
   sed -i 's/\r$//' "$tmp" 2>/dev/null || true
   mv "$tmp" "$dst"
   [ "$mode" = "+x" ] && chmod +x "$dst"
@@ -88,13 +87,14 @@ fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
 # ---------- TinyFM PHP & LuCI Views/Controller ----------
 say "Menambahkan TinyFM PHP & LuCI views/controller"
-# Web PHP: yaml.php WAJIB dari repo (gagal jika tidak ada)
+# Web PHP: yaml.php WAJIB ada pada commit ini (gagal bila 404)
 fetch files/www/tinyfm/yaml.php /www/tinyfm/yaml.php
-# Web PHP: logrotor.php WAJIB ada — jika unduh gagal, buat STUB
+
+# Web PHP: logrotor.php WAJIB — jika tidak ada di commit ini, buat STUB
+mkdir -p /www/tinyfm
 if ! curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 \
-     "$REPO_BASE/files/www/tinyfm/logrotor.php" -o /www/tinyfm/logrotor.php.tmp 2>/dev/null; then
-  say "logrotor.php tidak ada di repo — membuat stub"
-  mkdir -p /www/tinyfm
+     "$RAW_BASE/files/www/tinyfm/logrotor.php" -o /www/tinyfm/logrotor.php.tmp 2>/dev/null; then
+  say "logrotor.php tidak ada di ref ${REPO_REF} — membuat stub"
   cat > /www/tinyfm/logrotor.php.tmp <<'PHP'
 <?php
 header('Content-Type: text/plain; charset=UTF-8');
@@ -106,25 +106,25 @@ fi
 sed -i 's/\r$//' /www/tinyfm/logrotor.php.tmp 2>/dev/null || true
 mv /www/tinyfm/logrotor.php.tmp /www/tinyfm/logrotor.php
 
-# LuCI views & controller (wajib)
+# LuCI views & controller
 fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
 fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
 fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
 
-# Bereskan artefak lama yang bentrok
+# Bersihkan artefak lama yang bentrok
 [ -f /www/yaml.html ] && rm -f /www/yaml.html
 [ -f /www/logrotor.html ] && rm -f /www/logrotor.html
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
 [ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# ---------- cron: enable/start + dua entri (paksa aktif) ----------
+# ---------- cron: enable/start + dua entri ----------
 if [ -x /etc/init.d/cron ]; then
   /etc/init.d/cron enable || true
   /etc/init.d/cron start  || true
 fi
 
 crontab -l > /tmp/mycron 2>/dev/null || true
-# hapus entri lama agar tidak dobel
+# hapus entri lama yang terkait agar tidak duplikat
 sed -i '/oc-rotor\.log/d' /tmp/mycron 2>/dev/null || true
 cat >> /tmp/mycron <<'CRON'
 # Update file log untuk web tiap 1 menit (ambil 500 baris terakhir dari syslog yang memuat tag oc-rotor)
@@ -153,6 +153,7 @@ say "Selesai ✅"
 cat <<EOF
 
 == Ringkasan ==
+- Ref dipakai : ${REPO_REF}
 - Modem CLI   : /usr/bin/modem
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
 - Env         : /etc/oc-rotor.env  [perm 600]
@@ -162,9 +163,9 @@ cat <<EOF
 - LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
 - Web Log     : /www/oc-rotor.log (update tiap 1 menit; truncate tiap 5 menit)
 
-Catatan:
-- Jika paket php-cgi tidak tersedia di repo OpenWrt kamu, file .php tetap terpasang namun perlu konfigurasi PHP manual agar berjalan.
-- Ubah /etc/oc-rotor.env sesuai sistem bila perlu, lalu:
+Tips:
+- Untuk pin manual: tambahkan --ref <sha|tag|branch>
+- Ubah /etc/oc-rotor.env bila perlu, lalu:
   /etc/init.d/oc-rotor restart
 - Cek log:
   logread -e oc-rotor | tail -n 50
