@@ -1,5 +1,6 @@
 #!/bin/sh
-# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP (logrotor.php opsional)
+# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP
+# logrotor.php opsional; cron diaktifkan & dijadwalkan (2 entri) seperti diminta
 set -eu
 
 REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
@@ -13,13 +14,14 @@ while [ $# -gt 0 ]; do
     --repo-base)
       [ $# -ge 2 ] || die "Argumen untuk --repo-base harus diisi"
       REPO_BASE="$2"; shift 2 ;;
-    *) die "Argumen tidak dikenal: $1" ;;
+    *)
+      die "Argumen tidak dikenal: $1" ;;
   esac
 done
 
 # ---------- cek root & platform ----------
 [ "$(id -u)" = "0" ] || die "Harus dijalankan sebagai root"
-[ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lewati jika custom build)"
+[ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lanjutkan jika custom build)"
 
 # ---------- helper pkg ----------
 need_update=0
@@ -41,7 +43,7 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
   [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/ssl/cert.pem ] || die "CA bundle tidak tersedia"
 fi
 
-# PHP-CGI untuk .php di uHTTPd (best effort; tidak fatal kalau gagal)
+# ---------- (opsional) PHP-CGI untuk .php di uHTTPd ----------
 say "Menyiapkan dukungan PHP-CGI (opsional)"
 if ! command -v php-cgi >/dev/null 2>&1; then
   [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
@@ -103,13 +105,14 @@ fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 # ---------- TinyFM PHP & LuCI Views/Controller ----------
 say "Menambahkan TinyFM PHP & LuCI views/controller"
 # Web PHP (yaml wajib, logrotor opsional)
-fetch files/www/tinyfm/yaml.php     /www/tinyfm/yaml.php
+fetch files/www/tinyfm/yaml.php         /www/tinyfm/yaml.php
 fetch_opt files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php
 # LuCI views (wajib)
 fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
 fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
 # LuCI controller (wajib)
 fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
+
 # Bersihkan artefak HTML lama jika ada
 [ -f /www/yaml.html ] && rm -f /www/yaml.html
 [ -f /www/logrotor.html ] && rm -f /www/logrotor.html
@@ -117,23 +120,23 @@ fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
 [ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# ---------- cron untuk log web (tetap) ----------
-say "Menetapkan cron untuk /www/oc-rotor.log (tiap menit, atomic write)"
-CR_TMP="/tmp/oc-installer-cron.$$"
-crontab -l 2>/dev/null > "$CR_TMP" || true
-sed -i '/oc-rotor\.log/d' "$CR_TMP" 2>/dev/null || true
-cat >> "$CR_TMP" <<'CRON'
-# Update file log untuk web tiap 1 menit (500 baris terakhir, atomic swap)
-*/1 * * * *  /bin/sh -c 'logread -e oc-rotor | tail -n 500 > /www/oc-rotor.log.tmp && mv /www/oc-rotor.log.tmp /www/oc-rotor.log'
-CRON
-crontab "$CR_TMP" 2>/dev/null || true
-rm -f "$CR_TMP"
-
-# pastikan crond aktif (jika ada)
+# ---------- cron: enable/start + dua entri sesuai permintaan ----------
 if [ -x /etc/init.d/cron ]; then
-  /etc/init.d/cron enable >/dev/null 2>&1 || true
-  /etc/init.d/cron start  >/dev/null 2>&1 || true
+  /etc/init.d/cron enable || true
+  /etc/init.d/cron start  || true
 fi
+
+crontab -l > /tmp/mycron 2>/dev/null || true
+# hapus entri lama yang mungkin dobel
+sed -i '/oc-rotor\.log/d' /tmp/mycron 2>/dev/null || true
+cat >> /tmp/mycron <<'CRON'
+# Update file log untuk web tiap 1 menit (ambil 500 baris terakhir dari syslog yang memuat tag oc-rotor)
+*/1 * * * *  /bin/sh -c 'logread -e oc-rotor | tail -n 500 > /www/oc-rotor.log'
+# Bersihkan/truncate file log web tiap 5 menit
+*/5 * * * *  /bin/sh -c ': > /www/oc-rotor.log'
+CRON
+crontab /tmp/mycron 2>/dev/null || true
+rm -f /tmp/mycron
 
 # ---------- enable services ----------
 say "Enable + start service rotor"
@@ -157,15 +160,14 @@ cat <<EOF
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
 - Env         : /etc/oc-rotor.env  [perm 600]
 - Web (PHP)   : http://$CTRL_HINT_IP/tinyfm/yaml.php
-                (logrotor.php opsional: http://$CTRL_HINT_IP/tinyfm/logrotor.php)
+                (opsional) http://$CTRL_HINT_IP/tinyfm/logrotor.php
 - LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
 - LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
-- Web Log     : /www/oc-rotor.log (diperbarui tiap menit oleh cron)
+- Web Log     : /www/oc-rotor.log (diperbarui tiap menit; dibersihkan tiap 5 menit)
 
-Catatan:
-- Jika /tinyfm/logrotor.php tidak tersedia di repo, skrip melewati tanpa gagal.
-- Ubah /etc/oc-rotor.env jika perlu, lalu:
+Tips:
+- Ubah /etc/oc-rotor.env sesuai sistem, lalu:
   /etc/init.d/oc-rotor restart
-- Cek log rotor:
+- Cek log:
   logread -e oc-rotor | tail -n 50
 EOF
