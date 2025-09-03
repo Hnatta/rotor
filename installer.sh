@@ -1,15 +1,10 @@
 #!/bin/sh
-# Robust installer — Rotor + Modem CLI + TinyFM PHP + LuCI (pin ke commit terbaru, stub bila 404)
-# - Paksa pasang /www/tinyfm/yaml.php dari repo (wajib)
-# - Paksa pasang /www/tinyfm/logrotor.php (repo; fallback stub jika 404)
-# - Pasang LuCI views (yaml.htm, logrotor.htm) & controller (toolsoc.lua); fallback stub jika 404
-# - Aktifkan cron + 2 entri (update 1 menit, truncate 5 menit)
+# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP
+# Instal via OpenWrt terminal (menimpa semua file bila ada):
+#   curl -fsSL https://raw.githubusercontent.com/Hnatta/rotor/main/installer.sh | sh
 set -eu
 
-OWNER="Hnatta"
-REPO="rotor"
-REF=""         # auto isi SHA commit terbaru, bisa di-override dengan --ref <sha|tag|branch>
-RAW_BASE=""
+REPO_BASE="https://raw.githubusercontent.com/Hnatta/rotor/main"
 
 say(){ echo "[installer] $*"; }
 die(){ echo "[installer][ERR] $*" >&2; exit 1; }
@@ -17,26 +12,14 @@ die(){ echo "[installer][ERR] $*" >&2; exit 1; }
 # ---------- argumen opsional ----------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --ref) [ $# -ge 2 ] || die "Butuh nilai untuk --ref"; REF="$2"; shift 2 ;;
+    --repo-base) [ $# -ge 2 ] || die "Butuh nilai untuk --repo-base"; REPO_BASE="$2"; shift 2 ;;
     *) die "Argumen tidak dikenal: $1" ;;
   esac
 done
 
 # ---------- cek root & platform ----------
 [ "$(id -u)" = "0" ] || die "Harus dijalankan sebagai root"
-[ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lanjut kalau custom build)"
-
-# ---------- pilih commit ----------
-if [ -z "$REF" ]; then
-  say "Mengambil commit terbaru dari GitHub API…"
-  REF="$(curl -fsSL -H 'User-Agent: rotor-installer' \
-        "https://api.github.com/repos/${OWNER}/${REPO}/commits?per_page=1" \
-        | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{7,40\}\)".*/\1/p' \
-        | head -n1 || true)"
-  [ -n "$REF" ] || { say "Gagal ambil SHA terbaru, fallback ke 'main'"; REF="main"; }
-fi
-RAW_BASE="https://raw.githubusercontent.com/${OWNER}/${REPO}/${REF}"
-say "Memakai ref: $REF"
+[ -f /etc/openwrt_release ] || say "Peringatan: bukan OpenWrt (lanjut jika custom build)"
 
 # ---------- paket minimal ----------
 need_update=0
@@ -57,8 +40,8 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
   [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/ssl/cert.pem ] || die "CA bundle tidak tersedia"
 fi
 
-# (opsional) PHP-CGI untuk .php di uHTTPd — best effort
-say "Menyiapkan dukungan PHP-CGI (opsional)"
+# ---------- (opsional) PHP-CGI untuk .php di uHTTPd ----------
+say "Menyiapkan PHP-CGI (opsional; best-effort)"
 if ! command -v php-cgi >/dev/null 2>&1; then
   [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
   opkg install php8-cgi || opkg install php7-cgi || true
@@ -74,105 +57,42 @@ if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
   fi
 fi
 
-# ---------- helper unduh ----------
-fetch_req(){ # required: fail hard jika 404
-  # $1=src relatif, $2=dst, $3(optional)=+x
+# ---------- helper unduh (timpa + atomic) ----------
+fetch() {
+  # $1: src (relatif REPO_BASE), $2: dst, $3 (opsi): +x
   local src="$1" dst="$2" mode="${3:-}" tmp dir
   dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
   tmp="${dst}.tmp.$$"
   say "Ambil $src -> $dst"
-  curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 "$RAW_BASE/$src" -o "$tmp"
+  curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 "$REPO_BASE/$src" -o "$tmp"
   sed -i 's/\r$//' "$tmp" 2>/dev/null || true
-  mv "$tmp" "$dst"
+  mv "$tmp" "$dst"          # timpa selalu
   [ "$mode" = "+x" ] && chmod +x "$dst"
 }
 
-fetch_opt(){ # optional: jika 404, return 1 (caller sediakan stub)
-  # $1=src relatif, $2=dst, $3(optional)=+x
-  local src="$1" dst="$2" mode="${3:-}" tmp dir
-  dir="$(dirname "$dst")"; [ -d "$dir" ] || mkdir -p "$dir"
-  tmp="${dst}.tmp.$$"
-  say "Ambil (opsional) $src -> $dst"
-  if curl -fSL --retry 3 --retry-delay 1 --connect-timeout 10 "$RAW_BASE/$src" -o "$tmp"; then
-    sed -i 's/\r$//' "$tmp" 2>/dev/null || true
-    mv "$tmp" "$dst"
-    [ "$mode" = "+x" ] && chmod +x "$dst"
-    return 0
-  else
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
-  fi
-}
+# ---------- pasang inti (TIMPA SEMUA) ----------
+fetch files/usr/bin/modem /usr/bin/modem +x
+fetch files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
+fetch files/etc/oc-rotor.env /etc/oc-rotor.env    # timpa env bila ada
+chmod 600 /etc/oc-rotor.env
+fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# ---------- pasang inti ----------
-fetch_req files/usr/bin/modem /usr/bin/modem +x
-fetch_req files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
-if [ ! -f /etc/oc-rotor.env ]; then
-  fetch_req files/etc/oc-rotor.env /etc/oc-rotor.env
-  chmod 600 /etc/oc-rotor.env
-else
-  say "/etc/oc-rotor.env sudah ada — tidak ditimpa"
-fi
-fetch_req files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
+# ---------- TinyFM PHP (TIMPA) ----------
+fetch files/www/tinyfm/yaml.php     /www/tinyfm/yaml.php
+fetch files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php || true  # jika 404 di repo, hilangkan '|| true' untuk fail-hard
 
-# ---------- TinyFM PHP ----------
-# yaml.php: WAJIB dari repo (biar ketahuan kalau repo salah)
-fetch_req files/www/tinyfm/yaml.php /www/tinyfm/yaml.php
-# logrotor.php: usahakan ambil; kalau 404 → buat stub
-if ! fetch_opt files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php ; then
-  say "logrotor.php tidak ada di ref $REF — membuat stub"
-  cat > /www/tinyfm/logrotor.php <<'PHP'
-<?php
-header('Content-Type: text/plain; charset=UTF-8');
-$log = '/www/oc-rotor.log';
-if (file_exists($log)) { readfile($log); }
-else { http_response_code(404); echo "Log tidak ditemukan: $log\n"; }
-PHP
-fi
+# ---------- LuCI views & controller (TIMPA) ----------
+fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
+fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
+fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
 
-# ---------- LuCI views & controller (ambil; jika 404 → stub minimal) ----------
-# yaml.htm
-if ! fetch_opt files/usr/lib/lua/luci/view/yaml.htm /usr/lib/lua/luci/view/yaml.htm ; then
-  say "yaml.htm tidak ada — membuat stub"
-  mkdir -p /usr/lib/lua/luci/view
-  cat > /usr/lib/lua/luci/view/yaml.htm <<'HTM'
-<%+header%>
-<h2>OC D/E (YAML)</h2>
-<iframe src="/tinyfm/yaml.php" style="width:100%;height:80vh;border:0;"></iframe>
-<%+footer%>
-HTM
-fi
-# logrotor.htm
-if ! fetch_opt files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm ; then
-  say "logrotor.htm tidak ada — membuat stub"
-  mkdir -p /usr/lib/lua/luci/view
-  cat > /usr/lib/lua/luci/view/logrotor.htm <<'HTM'
-<%+header%>
-<h2>OC Ping — Log</h2>
-<iframe src="/tinyfm/logrotor.php" style="width:100%;height:80vh;border:0;"></iframe>
-<%+footer%>
-HTM
-fi
-# controller toolsoc.lua
-if ! fetch_opt files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua ; then
-  say "toolsoc.lua tidak ada — membuat stub"
-  mkdir -p /usr/lib/lua/luci/controller
-  cat > /usr/lib/lua/luci/controller/toolsoc.lua <<'LUA'
-module("luci.controller.toolsoc", package.seeall)
-function index()
-  entry({"admin","services","oc_de"},   template("yaml"),     _("OC D/E"),  20).dependent=false
-  entry({"admin","services","oc_ping"}, template("logrotor"), _("OC Ping"), 21).dependent=false
-end
-LUA
-fi
-
-# Bersihkan artefak lama yang bentrok
+# ---------- bersihkan artefak lama yang bentrok ----------
 [ -f /www/yaml.html ] && rm -f /www/yaml.html
 [ -f /www/logrotor.html ] && rm -f /www/logrotor.html
 [ -f /usr/lib/lua/luci/controller/oc-tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc-tools.lua
 [ -f /usr/lib/lua/luci/controller/oc_tools.lua ] && rm -f /usr/lib/lua/luci/controller/oc_tools.lua
 
-# ---------- cron: enable/start + dua entri ----------
+# ---------- cron: enable/start + dua entri (tulis & truncate) ----------
 if [ -x /etc/init.d/cron ]; then
   /etc/init.d/cron enable || true
   /etc/init.d/cron start  || true
@@ -206,10 +126,9 @@ say "Selesai ✅"
 cat <<EOF
 
 == Ringkasan ==
-- Ref dipakai : ${REF}
 - Modem CLI   : /usr/bin/modem
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
-- Env         : /etc/oc-rotor.env  [perm 600]
+- Env         : /etc/oc-rotor.env  [perm 600] (ditimpa dari repo)
 - Web (PHP)   : http://$CTRL_HINT_IP/tinyfm/yaml.php
                 http://$CTRL_HINT_IP/tinyfm/logrotor.php
 - LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
