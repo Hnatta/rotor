@@ -1,6 +1,6 @@
 #!/bin/sh
-# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM PHP
-# Instal via OpenWrt terminal (menimpa semua file bila ada):
+# installer.sh — Rotor + Modem CLI + LuCI views + TinyFM HTML (no PHP)
+# Instal via terminal OpenWrt (TIMPA semua file):
 #   curl -fsSL https://raw.githubusercontent.com/Hnatta/rotor/main/installer.sh | sh
 set -eu
 
@@ -40,23 +40,6 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/ssl/cert.pem ]; th
   [ -s /etc/ssl/certs/ca-certificates.crt ] || [ -s /etc/ssl/cert.pem ] || die "CA bundle tidak tersedia"
 fi
 
-# ---------- (opsional) PHP-CGI untuk .php di uHTTPd ----------
-say "Menyiapkan PHP-CGI (opsional; best-effort)"
-if ! command -v php-cgi >/dev/null 2>&1; then
-  [ $need_update -eq 0 ] && { opkg update || true; need_update=1; }
-  opkg install php8-cgi || opkg install php7-cgi || true
-fi
-if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
-  if ! uci -q show uhttpd.main.interpreter | grep -q "\.php=/usr/bin/php-cgi"; then
-    uci add_list uhttpd.main.interpreter=".php=/usr/bin/php-cgi" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
-  fi
-  if ! uci -q show uhttpd.main.index_page | grep -q "index.php"; then
-    uci add_list uhttpd.main.index_page="index.php" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
-  fi
-fi
-
 # ---------- helper unduh (timpa + atomic) ----------
 fetch() {
   # $1: src (relatif REPO_BASE), $2: dst, $3 (opsi): +x
@@ -73,15 +56,21 @@ fetch() {
 # ---------- pasang inti (TIMPA SEMUA) ----------
 fetch files/usr/bin/modem /usr/bin/modem +x
 fetch files/usr/bin/oc-rotor.sh /usr/bin/oc-rotor.sh +x
-fetch files/etc/oc-rotor.env /etc/oc-rotor.env    # timpa env bila ada
+fetch files/etc/oc-rotor.env /etc/oc-rotor.env
 chmod 600 /etc/oc-rotor.env
 fetch files/etc/init.d/oc-rotor /etc/init.d/oc-rotor +x
 
-# ---------- TinyFM PHP (TIMPA) ----------
-fetch files/www/tinyfm/yaml.php     /www/tinyfm/yaml.php
-fetch files/www/tinyfm/logrotor.php /www/tinyfm/logrotor.php || true  # jika 404 di repo, hilangkan '|| true' untuk fail-hard
+# ---------- TinyFM: gunakan HTML, bukan PHP (TIMPA) ----------
+# file baru di repo diharapkan: files/www/tinyfm/yaml.html dan files/www/tinyfm/logrotor.html
+fetch files/www/tinyfm/yaml.html     /www/tinyfm/yaml.html
+fetch files/www/tinyfm/logrotor.html /www/tinyfm/logrotor.html
+
+# bersihkan file PHP lama bila ada
+[ -f /www/tinyfm/yaml.php ] && rm -f /www/tinyfm/yaml.php
+[ -f /www/tinyfm/logrotor.php ] && rm -f /www/tinyfm/logrotor.php
 
 # ---------- LuCI views & controller (TIMPA) ----------
+# Pastikan views merujuk ke .html (bukan .php)
 fetch files/usr/lib/lua/luci/view/yaml.htm     /usr/lib/lua/luci/view/yaml.htm
 fetch files/usr/lib/lua/luci/view/logrotor.htm /usr/lib/lua/luci/view/logrotor.htm
 fetch files/usr/lib/lua/luci/controller/toolsoc.lua /usr/lib/lua/luci/controller/toolsoc.lua
@@ -128,9 +117,9 @@ cat <<EOF
 == Ringkasan ==
 - Modem CLI   : /usr/bin/modem
 - Rotor       : /usr/bin/oc-rotor.sh (service: /etc/init.d/oc-rotor)
-- Env         : /etc/oc-rotor.env  [perm 600] (ditimpa dari repo)
-- Web (PHP)   : http://$CTRL_HINT_IP/tinyfm/yaml.php
-                http://$CTRL_HINT_IP/tinyfm/logrotor.php
+- Env         : /etc/oc-rotor.env  [perm 600] (ditimpa)
+- Web (HTML)  : http://$CTRL_HINT_IP/tinyfm/yaml.html
+                http://$CTRL_HINT_IP/tinyfm/logrotor.html
 - LuCI Views  : /usr/lib/lua/luci/view/{yaml.htm,logrotor.htm}
 - LuCI Menu   : Services → OC D/E, Services → OC Ping (controller: toolsoc.lua)
 - Web Log     : /www/oc-rotor.log (update tiap 1 menit; truncate tiap 5 menit)
